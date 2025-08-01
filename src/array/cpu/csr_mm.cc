@@ -1,13 +1,16 @@
-/*!
+/**
  *  Copyright (c) 2019 by Contributors
- * \file array/cpu/csr_mm.cc
- * \brief CSR Matrix Multiplication
+ * @file array/cpu/csr_mm.cc
+ * @brief CSR Matrix Multiplication
  */
 
 #include <dgl/array.h>
 #include <dgl/runtime/parallel_for.h>
-#include <parallel_hashmap/phmap.h>
+#include <tsl/robin_map.h>
+#include <tsl/robin_set.h>
+
 #include <vector>
+
 #include "array_utils.h"
 
 namespace dgl {
@@ -22,15 +25,11 @@ namespace {
 // TODO(BarclayII): avoid using map for sorted CSRs
 template <typename IdType>
 void CountNNZPerRow(
-    const IdType* A_indptr,
-    const IdType* A_indices,
-    const IdType* B_indptr,
-    const IdType* B_indices,
-    IdType* C_indptr_data,
-    int64_t M) {
+    const IdType* A_indptr, const IdType* A_indices, const IdType* B_indptr,
+    const IdType* B_indices, IdType* C_indptr_data, int64_t M) {
   parallel_for(0, M, [=](size_t b, size_t e) {
     for (auto i = b; i < e; ++i) {
-      phmap::flat_hash_set<IdType> set;
+      tsl::robin_set<IdType> set;
       for (IdType u = A_indptr[i]; u < A_indptr[i + 1]; ++u) {
         IdType w = A_indices[u];
         for (IdType v = B_indptr[w]; v < B_indptr[w + 1]; ++v)
@@ -56,21 +55,13 @@ int64_t ComputeIndptrInPlace(IdType* C_indptr_data, int64_t M) {
 
 template <typename IdType, typename DType>
 void ComputeIndicesAndData(
-    const IdType* A_indptr,
-    const IdType* A_indices,
-    const IdType* A_eids,
-    const DType* A_data,
-    const IdType* B_indptr,
-    const IdType* B_indices,
-    const IdType* B_eids,
-    const DType* B_data,
-    const IdType* C_indptr_data,
-    IdType* C_indices_data,
-    DType* C_weights_data,
-    int64_t M) {
+    const IdType* A_indptr, const IdType* A_indices, const IdType* A_eids,
+    const DType* A_data, const IdType* B_indptr, const IdType* B_indices,
+    const IdType* B_eids, const DType* B_data, const IdType* C_indptr_data,
+    IdType* C_indices_data, DType* C_weights_data, int64_t M) {
   parallel_for(0, M, [=](size_t b, size_t e) {
     for (auto i = b; i < e; ++i) {
-      phmap::flat_hash_map<IdType, DType> map;
+      tsl::robin_map<IdType, DType> map;
       for (IdType u = A_indptr[i]; u < A_indptr[i + 1]; ++u) {
         IdType w = A_indices[u];
         DType vA = A_data[A_eids ? A_eids[u] : u];
@@ -95,11 +86,10 @@ void ComputeIndicesAndData(
 
 template <int XPU, typename IdType, typename DType>
 std::pair<CSRMatrix, NDArray> CSRMM(
-    const CSRMatrix& A,
-    NDArray A_weights,
-    const CSRMatrix& B,
+    const CSRMatrix& A, NDArray A_weights, const CSRMatrix& B,
     NDArray B_weights) {
-  CHECK_EQ(A.num_cols, B.num_rows) << "A's number of columns must equal to B's number of rows";
+  CHECK_EQ(A.num_cols, B.num_rows)
+      << "A's number of columns must equal to B's number of rows";
   const bool A_has_eid = !IsNullArray(A.data);
   const bool B_has_eid = !IsNullArray(B.data);
   const IdType* A_indptr = A.indptr.Ptr<IdType>();
@@ -116,7 +106,8 @@ std::pair<CSRMatrix, NDArray> CSRMM(
   IdArray C_indptr = IdArray::Empty({M + 1}, A.indptr->dtype, A.indptr->ctx);
   IdType* C_indptr_data = C_indptr.Ptr<IdType>();
 
-  CountNNZPerRow<IdType>(A_indptr, A_indices, B_indptr, B_indices, C_indptr_data, M);
+  CountNNZPerRow<IdType>(
+      A_indptr, A_indices, B_indptr, B_indices, C_indptr_data, M);
   int64_t nnz = ComputeIndptrInPlace<IdType>(C_indptr_data, M);
   // Allocate indices and weights array
   IdArray C_indices = IdArray::Empty({nnz}, A.indices->dtype, A.indices->ctx);
@@ -125,22 +116,22 @@ std::pair<CSRMatrix, NDArray> CSRMM(
   DType* C_weights_data = C_weights.Ptr<DType>();
 
   ComputeIndicesAndData<IdType, DType>(
-      A_indptr, A_indices, A_eids, A_data,
-      B_indptr, B_indices, B_eids, B_data,
+      A_indptr, A_indices, A_eids, A_data, B_indptr, B_indices, B_eids, B_data,
       C_indptr_data, C_indices_data, C_weights_data, M);
 
   return {
-      CSRMatrix(M, P, C_indptr, C_indices, NullArray(C_indptr->dtype, C_indptr->ctx)),
+      CSRMatrix(
+          M, P, C_indptr, C_indices, NullArray(C_indptr->dtype, C_indptr->ctx)),
       C_weights};
 }
 
-template std::pair<CSRMatrix, NDArray> CSRMM<kDLCPU, int32_t, float>(
+template std::pair<CSRMatrix, NDArray> CSRMM<kDGLCPU, int32_t, float>(
     const CSRMatrix&, NDArray, const CSRMatrix&, NDArray);
-template std::pair<CSRMatrix, NDArray> CSRMM<kDLCPU, int64_t, float>(
+template std::pair<CSRMatrix, NDArray> CSRMM<kDGLCPU, int64_t, float>(
     const CSRMatrix&, NDArray, const CSRMatrix&, NDArray);
-template std::pair<CSRMatrix, NDArray> CSRMM<kDLCPU, int32_t, double>(
+template std::pair<CSRMatrix, NDArray> CSRMM<kDGLCPU, int32_t, double>(
     const CSRMatrix&, NDArray, const CSRMatrix&, NDArray);
-template std::pair<CSRMatrix, NDArray> CSRMM<kDLCPU, int64_t, double>(
+template std::pair<CSRMatrix, NDArray> CSRMM<kDGLCPU, int64_t, double>(
     const CSRMatrix&, NDArray, const CSRMatrix&, NDArray);
 
 };  // namespace aten
